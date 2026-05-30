@@ -667,6 +667,31 @@ async function loadItems(db: any) {
   return rows
 }
 
+// Gmail-style buckets. Each item falls into exactly one tab. Order matters
+// because send_pending and revision_pending can both be 1 in edge cases (race
+// between user clicks) — terminal states win, then pending flags, then draft.
+type Buckets = { drafts: any[]; revising: any[]; outgoing: any[]; sent: any[]; rejected: any[] }
+function bucketItems(items: any[]): Buckets {
+  const b: Buckets = { drafts: [], revising: [], outgoing: [], sent: [], rejected: [] }
+  for (const it of items) {
+    if (it.status === 'sent') b.sent.push(it)
+    else if (it.status === 'rejected') {
+      if (it.rejection_reason) b.rejected.push(it)
+      // silent discards (no reason) are hidden from every tab
+    } else if (it.revision_pending) b.revising.push(it)
+    else if (it.send_pending) b.outgoing.push(it)
+    else b.drafts.push(it)
+  }
+  return b
+}
+
+const TAB_IDS = ['drafts', 'revising', 'outgoing', 'sent', 'rejected'] as const
+type TabId = typeof TAB_IDS[number]
+function normalizeTab(raw: string | undefined): TabId {
+  const t = (raw || 'drafts') as TabId
+  return TAB_IDS.includes(t) ? t : 'drafts'
+}
+
 async function loadItem(db: any, id: string) {
   const rows = (await db.rawSQL({
     q: 'SELECT * FROM feed_items WHERE id = ? LIMIT 1',
@@ -675,30 +700,41 @@ async function loadItem(db: any, id: string) {
   return rows[0] || null
 }
 
-function renderPage(items: any[], activeItem: any, opts: { flash?: string, replyOpen?: boolean } = {}): any {
+function renderTabsStrip(activeTab: TabId, buckets: Buckets): any {
+  const tabs: Array<{ id: TabId; label: string; count: number }> = [
+    { id: 'drafts',   label: 'Drafts',   count: buckets.drafts.length },
+    { id: 'revising', label: 'Revising', count: buckets.revising.length },
+    { id: 'outgoing', label: 'Outgoing', count: buckets.outgoing.length },
+    { id: 'sent',     label: 'Sent',     count: buckets.sent.length },
+    { id: 'rejected', label: 'Rejected', count: buckets.rejected.length },
+  ]
+  return html`
+    <div class="flex border-b border-gray-200 bg-white">
+      ${tabs.map(t => html`
+        <a href="/?tab=${esc(t.id)}"
+           class="flex items-center gap-2 px-4 py-2.5 text-[13px] border-b-2 ${activeTab === t.id ? 'border-blue-500 text-gray-900 font-medium' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}">
+          <span>${esc(t.label)}</span>
+          ${t.count > 0 ? html`<span class="px-1.5 py-0.5 text-[11px] rounded-full ${activeTab === t.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'} tabular-nums min-w-[20px] text-center">${t.count}</span>` : ''}
+        </a>
+      `)}
+    </div>`
+}
+
+function renderPage(buckets: Buckets, activeTab: TabId, activeItem: any, opts: { flash?: string, replyOpen?: boolean } = {}): any {
+  const visible = buckets[activeTab]
+  const totalCount = Object.values(buckets).reduce((s, b) => s + b.length, 0)
   return html`
     <div class="h-full flex flex-col bg-[#f1f3f4]">
-      ${renderTopBar(items.length, opts.flash)}
+      ${renderTopBar(totalCount, opts.flash)}
       <div class="flex-1 flex min-h-0 p-3 gap-3">
         <aside class="w-[460px] flex-shrink-0 bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col shadow-sm">
-          <div class="px-4 py-2.5 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-            <div class="flex items-center gap-2 text-[13px] text-gray-700">
-              <input type="checkbox" class="w-3.5 h-3.5 rounded border-gray-300" />
-              <span class="font-medium">Outbox</span>
-              <span class="text-gray-400">·</span>
-              <span class="text-gray-500 tabular-nums">${items.length}</span>
-            </div>
-            <div class="flex items-center gap-1 text-gray-400">
-              <button class="hover:text-gray-700 leading-none p-1" title="Refresh">⟳</button>
-              <button class="hover:text-gray-700 leading-none p-1" title="More">⋯</button>
-            </div>
-          </div>
+          ${renderTabsStrip(activeTab, buckets)}
           <div class="flex-1 scroll-y">
-            ${renderList(items, activeItem ? activeItem.id : null)}
+            ${renderList(visible, activeItem ? activeItem.id : null)}
           </div>
         </aside>
         <main class="flex-1 min-w-0 bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-          ${activeItem ? renderDetail(activeItem, !!opts.replyOpen) : renderEmptyDetail(items.length)}
+          ${activeItem ? renderDetail(activeItem, !!opts.replyOpen) : renderEmptyDetail(visible.length)}
         </main>
       </div>
     </div>`
@@ -711,8 +747,10 @@ function renderPage(items: any[], activeItem: any, opts: { flash?: string, reply
 app.get('/', async (c) => {
   const db = c.get('$db')
   const items = await loadItems(db)
+  const buckets = bucketItems(items)
+  const activeTab = normalizeTab(c.req.query('tab'))
   const flash = c.req.query('flash') || undefined
-  return c.html(layout(c, renderPage(items, null, { flash })))
+  return c.html(layout(c, renderPage(buckets, activeTab, null, { flash })))
 })
 
 app.get('/items/:id', async (c) => {
@@ -721,10 +759,19 @@ app.get('/items/:id', async (c) => {
   const replyOpen = c.req.query('reply') === '1'
   const flash = c.req.query('flash') || undefined
   const [items, item] = await Promise.all([loadItems(db), loadItem(db, id)])
-  if (!item) {
-    return c.html(layout(c, renderPage(items, null, { flash: 'Item not found' })), 404)
+  const buckets = bucketItems(items)
+  // When opening a detail page, pick the tab that actually contains this item
+  // (so the sidebar list shows it as the selected row). Falls back to ?tab=
+  // query param if explicitly set, then drafts.
+  const queryTab = c.req.query('tab')
+  let activeTab: TabId = normalizeTab(queryTab)
+  if (!queryTab && item) {
+    for (const t of TAB_IDS) if (buckets[t].some((x: any) => x.id === item.id)) { activeTab = t; break }
   }
-  return c.html(layout(c, renderPage(items, item, { replyOpen, flash })))
+  if (!item) {
+    return c.html(layout(c, renderPage(buckets, activeTab, null, { flash: 'Item not found' })), 404)
+  }
+  return c.html(layout(c, renderPage(buckets, activeTab, item, { replyOpen, flash })))
 })
 
 // POST /items/:id/send — UI form: flip send_pending=1, also store any manual edits to current_draft
