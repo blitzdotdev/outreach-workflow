@@ -212,7 +212,7 @@ function renderListRow(item: any, activeId: string | null): any {
   if (isSent) {
     rightLabel = html`<span class="text-[11px] text-emerald-700 font-semibold">Sent</span>`
   } else if (isQueued) {
-    rightLabel = html`<span class="text-[11px] text-amber-700 font-semibold">Sending…</span>`
+    rightLabel = html`<span class="text-[11px] text-amber-700 font-semibold">Pending…</span>`
   } else if (isRevising) {
     rightLabel = html`<span class="text-[11px] text-violet-700 font-semibold">Revising…</span>`
   } else if (isRejected) {
@@ -228,7 +228,7 @@ function renderListRow(item: any, activeId: string | null): any {
       <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
     </span>`
   } else if (isQueued) {
-    leadingIcon = html`<span class="w-4 flex-shrink-0 text-amber-500 leading-none" title="Sending">
+    leadingIcon = html`<span class="w-4 flex-shrink-0 text-amber-500 leading-none" title="Pending send">
       <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
     </span>`
   } else if (isRevising) {
@@ -486,8 +486,8 @@ function renderQueuedBanner(item: any): any {
         <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
       </div>
       <div class="flex-1 min-w-0">
-        <div class="text-[13px] font-medium text-amber-900">Sending to ${esc(item.target_handle || 'recipient')} on ${esc(platformName)}…</div>
-        <div class="text-[11px] text-amber-700 mt-0.5">Queued. Waiting for autolead to deliver.</div>
+        <div class="text-[13px] font-medium text-amber-900">Pending send to ${esc(item.target_handle || 'recipient')} on ${esc(platformName)}…</div>
+        <div class="text-[11px] text-amber-700 mt-0.5">Queued. Run "send" in your Claude session to deliver.</div>
       </div>
       <form method="POST" action="/items/${esc(item.id)}/unqueue" class="flex-shrink-0">
         <button type="submit" class="text-[12px] text-amber-700 hover:text-amber-900 font-medium underline-offset-2 hover:underline">Cancel</button>
