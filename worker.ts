@@ -160,6 +160,20 @@ ${bodyHtml}
     var next = e.key === 'j' ? rows[Math.min(idx + 1, rows.length - 1)] : rows[Math.max(idx - 1, 0)];
     if (next) next.click();
   });
+  // Cmd/Ctrl+Enter inside a form's textarea submits the form's PRIMARY button.
+  // Primary = the first submit button without formaction (Send in the draft card,
+  // Revise in the reply card). Reject buttons use formaction, so they're skipped.
+  document.addEventListener('keydown', function(e) {
+    if (!((e.metaKey || e.ctrlKey) && e.key === 'Enter')) return;
+    var ta = e.target.closest('textarea');
+    if (!ta) return;
+    var form = ta.closest('form');
+    if (!form) return;
+    var primary = form.querySelector('button[type="submit"]:not([formaction])');
+    if (!primary) return;
+    e.preventDefault();
+    primary.click();
+  });
 </script>
 </body></html>`
 }
@@ -195,7 +209,7 @@ function renderTopBar(itemCount: number, flash?: string): any {
 // List sidebar (Gmail inbox style)
 // ──────────────────────────────────────────────────────────────────
 
-function renderListRow(item: any, activeId: string | null): any {
+function renderListRow(item: any, activeId: string | null, activeTab: string = 'drafts'): any {
   const isActive = activeId === item.id
   const ev = item.ev_score == null ? 0 : Number(item.ev_score)
   const evPct = Math.round(ev * 100)
@@ -281,7 +295,7 @@ function renderListRow(item: any, activeId: string | null): any {
                 : 'hover:bg-gray-50'
 
   return html`
-    <a href="/items/${esc(item.id)}" data-row-id="${esc(item.id)}" ${isActive ? 'data-active="1"' : ''}
+    <a href="/items/${esc(item.id)}?tab=${esc(activeTab)}" data-row-id="${esc(item.id)}" ${isActive ? 'data-active="1"' : ''}
        class="group relative flex items-center gap-3 pl-4 pr-4 py-2.5 border-b border-gray-100 ${bgClass} text-[13px]">
       ${edgeStripe}
       ${leadingIcon}
@@ -295,13 +309,13 @@ function renderListRow(item: any, activeId: string | null): any {
     </a>`
 }
 
-function renderList(items: any[], activeId: string | null): any {
+function renderList(items: any[], activeId: string | null, activeTab: string = 'drafts'): any {
   if (items.length === 0) {
     return html`<div class="p-10 text-center text-sm text-gray-500">
       No drafts yet. Click <span class="font-medium text-gray-700">Begin research</span> to fill the queue.
     </div>`
   }
-  return html`<div class="bg-white">${items.map(it => renderListRow(it, activeId))}</div>`
+  return html`<div class="bg-white">${items.map(it => renderListRow(it, activeId, activeTab))}</div>`
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -475,7 +489,7 @@ function renderPostit(item: any): any {
 // Draft card (the email composition surface)
 // ──────────────────────────────────────────────────────────────────
 
-function renderQueuedBanner(item: any): any {
+function renderQueuedBanner(item: any, activeTab: string = 'sent'): any {
   const channel = (item.channel || '').toLowerCase()
   const platformName = channel === 'x' || channel === 'twitter' ? 'x.com'
                      : channel === 'reddit' ? 'reddit'
@@ -490,6 +504,7 @@ function renderQueuedBanner(item: any): any {
         <div class="text-[11px] text-amber-700 mt-0.5">Queued. Run "send" in your Claude session to deliver.</div>
       </div>
       <form method="POST" action="/items/${esc(item.id)}/unqueue" class="flex-shrink-0">
+        <input type="hidden" name="tab" value="${esc(activeTab)}">
         <button type="submit" class="text-[12px] text-amber-700 hover:text-amber-900 font-medium underline-offset-2 hover:underline">Cancel</button>
       </form>
     </div>`
@@ -526,7 +541,7 @@ function renderRejectedBanner(item: any): any {
     </div>`
 }
 
-function renderDraftCard(item: any, replyOpen: boolean): any {
+function renderDraftCard(item: any, replyOpen: boolean, activeTab: string = 'drafts'): any {
   const limit = channelLimit(item.channel)
   const recipient = item.target_handle || 'recipient'
   const recipientShort = recipient.length > 14 ? recipient.slice(0, 14) + '…' : recipient
@@ -541,6 +556,7 @@ function renderDraftCard(item: any, replyOpen: boolean): any {
 
   return html`
     <form method="POST" action="/items/${esc(item.id)}/send" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <input type="hidden" name="tab" value="${esc(activeTab)}">
       <!-- Header strip -->
       <div class="px-5 py-3 flex items-center justify-between border-b border-gray-100">
         <div class="flex items-center gap-2.5 text-[13px] text-gray-700 min-w-0">
@@ -575,7 +591,7 @@ function renderDraftCard(item: any, replyOpen: boolean): any {
         ` : ''}
       </div>
       ${readOnly
-        ? (isSent ? renderSentBanner(item) : isRejected ? renderRejectedBanner(item) : renderQueuedBanner(item))
+        ? (isSent ? renderSentBanner(item) : isRejected ? renderRejectedBanner(item) : renderQueuedBanner(item, activeTab))
         : html`
           <!-- Action row -->
           <div class="px-5 py-3 border-t border-gray-100 flex items-center justify-between bg-white">
@@ -604,11 +620,12 @@ function renderDraftCard(item: any, replyOpen: boolean): any {
 // Reply card (spawned when ?reply=1)
 // ──────────────────────────────────────────────────────────────────
 
-function renderReplyCard(item: any): any {
+function renderReplyCard(item: any, activeTab: string = 'drafts'): any {
   return html`
     <div class="mt-4 flex gap-3" id="reply">
       <div class="w-10 h-10 rounded-full bg-gray-300 text-white flex items-center justify-center flex-shrink-0 text-[14px] font-bold">M</div>
       <form method="POST" action="/items/${esc(item.id)}/reply" class="flex-1 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <input type="hidden" name="tab" value="${esc(activeTab)}">
         <div class="px-5 py-3 flex items-center justify-between border-b border-gray-100">
           <div class="flex items-center gap-2.5 text-[13px] min-w-0">
             <span class="text-gray-400 flex-shrink-0">
@@ -652,15 +669,15 @@ function renderReplyCard(item: any): any {
 // Detail pane assembly
 // ──────────────────────────────────────────────────────────────────
 
-function renderDetail(item: any, replyOpen: boolean): any {
+function renderDetail(item: any, replyOpen: boolean, activeTab: string = 'drafts'): any {
   const showSource = hasParentContent(item)
   return html`
     <div class="flex flex-col h-full">
       ${renderDetailHeader(item)}
       <div class="flex-1 scroll-y px-8 py-6">
         ${showSource ? html`<div class="mb-6">${renderSourceContext(item)}</div>` : ''}
-        ${renderDraftCard(item, replyOpen)}
-        ${replyOpen && item.status !== 'sent' && item.status !== 'rejected' ? renderReplyCard(item) : ''}
+        ${renderDraftCard(item, replyOpen, activeTab)}
+        ${replyOpen && item.status !== 'sent' && item.status !== 'rejected' ? renderReplyCard(item, activeTab) : ''}
         <div class="h-10"></div>
       </div>
     </div>`
@@ -716,6 +733,21 @@ function normalizeTab(raw: string | undefined): TabId {
   return TAB_IDS.includes(t) ? t : 'drafts'
 }
 
+// After a Send / Reject (item leaves the current tab), pick the next sibling in
+// the SAME tab so the user can keep flowing. Empty tab → land on the list.
+// We compute against PRE-update state and use the item's slot in the bucket to
+// pick what was directly after it; if it was last, pick what was before.
+async function nextItemUrlInTab(db: any, currentId: string, tab: TabId): Promise<string> {
+  const items = await loadItems(db)
+  const buckets = bucketItems(items)
+  const tabItems = buckets[tab] || []
+  const currentIdx = tabItems.findIndex((i: any) => i.id === currentId)
+  const remaining = tabItems.filter((i: any) => i.id !== currentId)
+  if (!remaining.length) return `/?tab=${tab}`
+  const next = currentIdx >= 0 ? (remaining[currentIdx] || remaining[currentIdx - 1] || remaining[0]) : remaining[0]
+  return `/items/${next.id}?tab=${tab}`
+}
+
 async function loadItem(db: any, id: string) {
   const rows = (await db.rawSQL({
     q: 'SELECT * FROM feed_items WHERE id = ? LIMIT 1',
@@ -752,11 +784,11 @@ function renderPage(buckets: Buckets, activeTab: TabId, activeItem: any, opts: {
         <aside class="w-[460px] flex-shrink-0 bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col shadow-sm">
           ${renderTabsStrip(activeTab, buckets)}
           <div class="flex-1 scroll-y">
-            ${renderList(visible, activeItem ? activeItem.id : null)}
+            ${renderList(visible, activeItem ? activeItem.id : null, activeTab)}
           </div>
         </aside>
         <main class="flex-1 min-w-0 bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-          ${activeItem ? renderDetail(activeItem, !!opts.replyOpen) : renderEmptyDetail(visible.length)}
+          ${activeItem ? renderDetail(activeItem, !!opts.replyOpen, activeTab) : renderEmptyDetail(visible.length)}
         </main>
       </div>
     </div>`
@@ -802,11 +834,12 @@ app.post('/items/:id/send', async (c) => {
   const id = c.req.param('id')
   const form = await c.req.formData()
   const draft = String(form.get('draft') || '')
+  const tab = normalizeTab(String(form.get('tab') || ''))
 
   const item = await loadItem(db, id)
-  if (!item) return c.redirect('/?flash=Item+not+found', 303)
+  if (!item) return c.redirect(`/?tab=${tab}&flash=Item+not+found`, 303)
   if (item.status === 'sent' || item.status === 'rejected') {
-    return c.redirect(`/items/${id}`, 303)
+    return c.redirect(`/items/${id}?tab=${tab}`, 303)
   }
 
   // Capture manual edit if the textarea differs from the latest draft.
@@ -831,24 +864,28 @@ app.post('/items/:id/send', async (c) => {
     ec.push({ role: 'user_manual_edit', draft, ts: new Date().toISOString() })
   }
 
+  // Compute "next item in this tab" BEFORE the update so the item still
+  // appears in its current bucket. After the update, item leaves the tab
+  // (drafts → outgoing/sent), so we land the user on what was after it.
+  const nextUrl = await nextItemUrlInTab(db, id, tab)
   await db.rawSQL({
     q: `UPDATE feed_items SET current_draft = ?, edit_chain = ?, send_pending = 1, approved_at = ? WHERE id = ?`,
     v: [draft, JSON.stringify(ec), new Date().toISOString(), id],
   }).run()
-
-  // No flash — the inline "Sending..." banner in the draft card is the confirmation.
-  return c.redirect(`/items/${id}`, 303)
+  return c.redirect(nextUrl, 303)
 })
 
 // POST /items/:id/unqueue — clear send_pending=0 (Gmail Undo equivalent before delivery)
 app.post('/items/:id/unqueue', async (c) => {
   const db = c.get('$db')
   const id = c.req.param('id')
+  const form = await c.req.formData().catch(() => null)
+  const tab = normalizeTab(String(form?.get('tab') || ''))
   await db.rawSQL({
     q: 'UPDATE feed_items SET send_pending = 0 WHERE id = ?',
     v: [id],
   }).run()
-  return c.redirect(`/items/${id}`, 303)
+  return c.redirect(`/items/${id}?tab=${tab}`, 303)
 })
 
 // POST /items/:id/reject — optional `text` (or `reason`) form field becomes the
@@ -859,12 +896,15 @@ app.post('/items/:id/reject', async (c) => {
   const id = c.req.param('id')
   const form = await c.req.formData()
   const reason = String(form.get('text') || form.get('reason') || '').trim() || null
+  const tab = normalizeTab(String(form.get('tab') || ''))
+  const nextUrl = await nextItemUrlInTab(db, id, tab)
   await db.rawSQL({
     q: 'UPDATE feed_items SET status = ?, rejection_reason = ?, rejected_at = ?, revision_pending = 0, send_pending = 0 WHERE id = ?',
     v: ['rejected', reason, new Date().toISOString(), id],
   }).run()
-  const flash = reason ? 'Rejected with reason (will inform next research cycle)' : 'Discarded'
-  return c.redirect(`/?flash=${encodeURIComponent(flash)}`, 303)
+  const flash = reason ? 'Rejected with reason' : 'Discarded'
+  const sep = nextUrl.includes('?') ? '&' : '?'
+  return c.redirect(`${nextUrl}${sep}flash=${encodeURIComponent(flash)}`, 303)
 })
 
 // POST /items/:id/reply — UI form: flip revision_pending=1, store feedback text + user_feedback chain entry
@@ -873,12 +913,13 @@ app.post('/items/:id/reply', async (c) => {
   const id = c.req.param('id')
   const form = await c.req.formData()
   const userText = String(form.get('text') || '').trim()
-  if (!userText) return c.redirect(`/items/${id}?reply=1`, 303)
+  const tab = normalizeTab(String(form.get('tab') || ''))
+  if (!userText) return c.redirect(`/items/${id}?reply=1&tab=${tab}`, 303)
 
   const item = await loadItem(db, id)
-  if (!item) return c.redirect('/?flash=Item+not+found', 303)
+  if (!item) return c.redirect(`/?tab=${tab}&flash=Item+not+found`, 303)
   if (item.status === 'sent' || item.status === 'rejected') {
-    return c.redirect(`/items/${id}`, 303)
+    return c.redirect(`/items/${id}?tab=${tab}`, 303)
   }
 
   // Append the user_feedback to edit_chain so it shows up in /api/pending
@@ -889,7 +930,8 @@ app.post('/items/:id/reply', async (c) => {
     q: 'UPDATE feed_items SET edit_chain = ?, revision_pending = 1, revision_feedback = ? WHERE id = ?',
     v: [JSON.stringify(ec), userText, id],
   }).run()
-  return c.redirect(`/items/${id}?flash=Queued+for+revision.+Run+%E2%80%9Cprocess+pending+autolead%E2%80%9D+in+your+Claude+session.`, 303)
+  // Revising items stay in the Drafts tab (just sub-state). Stay on current item.
+  return c.redirect(`/items/${id}?tab=${tab}&flash=Queued+for+revision.+Run+%22send%22+in+your+Claude+session.`, 303)
 })
 
 // POST /research (UI form) — no-op for v1; research is initiated from the Claude terminal.
