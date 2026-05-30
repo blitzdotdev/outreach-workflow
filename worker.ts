@@ -21,6 +21,7 @@
 
 import { $Database, teenyHono, OpenApiExtension, PocketUIExtension, Hono, html, raw } from 'teenybase'
 import config from 'virtual:teenybase'
+import { diffWords } from './diff.ts'
 
 const app = new Hono()
 
@@ -733,11 +734,25 @@ app.post('/items/:id/send', async (c) => {
     return c.redirect(`/items/${id}`, 303)
   }
 
-  // Capture manual edit if the textarea differs from the latest draft
+  // Capture manual edit if the textarea differs from the latest draft.
+  // Defensive: if the chain has no ai-role entry (item pre-dates the seed-on-insert
+  // fix, or was inserted by a path that skipped seeding), seed one from the prior
+  // current_draft before recording the user's edit — otherwise the original AI
+  // draft is silently destroyed when we UPDATE current_draft below.
   const ec = parseJson(item.edit_chain) || []
   const lastAiDraft = [...ec].reverse().find((e: any) => e?.role === 'ai' || e?.role === 'cmo')?.draft
   const manuallyEdited = lastAiDraft ? lastAiDraft !== draft : draft !== item.current_draft
   if (manuallyEdited) {
+    if (lastAiDraft == null) {
+      ec.unshift({
+        role: 'ai',
+        v: 1,
+        draft: item.current_draft,
+        ts: item.created || new Date().toISOString(),
+        skill_snapshot_hash: item.skill_snapshot_hash ?? null,
+        backfilled: true,
+      })
+    }
     ec.push({ role: 'user_manual_edit', draft, ts: new Date().toISOString() })
   }
 
@@ -859,6 +874,143 @@ app.post('/api/skill', async (c) => {
   return c.json({ ok: true, hash })
 })
 
+// GET /api/examples — fetch sent examples for review or for runtime ambiguity lookups.
+// Filters: since (ISO), channel, audience, message_type, goal, q (LIKE on draft+sent+parent),
+// limit (default 50, max 200). Default JSON; ?format=md returns markdown with
+// word-level diffs computed via jsdiff (vendored at ./diff.ts) — same algorithm
+// family as `git diff --word-diff=plain`, just running in the worker so the route
+// is self-contained.
+app.get('/api/examples', async (c) => {
+  const db = c.get('$db')
+  const qp = (k: string) => c.req.query(k)
+  const wheres: string[] = []
+  const vals: any[] = []
+  if (qp('since'))        { wheres.push('e.sent_at >= ?');     vals.push(qp('since')) }
+  if (qp('channel'))      { wheres.push('e.channel = ?');      vals.push(qp('channel')) }
+  if (qp('audience'))     { wheres.push('e.audience = ?');     vals.push(qp('audience')) }
+  if (qp('message_type')) { wheres.push('e.message_type = ?'); vals.push(qp('message_type')) }
+  if (qp('goal'))         { wheres.push('e.goal = ?');         vals.push(qp('goal')) }
+  if (qp('q')) {
+    wheres.push('(e.initial_draft LIKE ? OR e.final_sent LIKE ? OR e.parent_context LIKE ?)')
+    const t = `%${qp('q')}%`; vals.push(t, t, t)
+  }
+  const where = wheres.length ? `WHERE ${wheres.join(' AND ')}` : ''
+  const limit = Math.min(Math.max(Number(qp('limit') || 50), 1), 200)
+  const rows: any[] = (await db.rawSQL({
+    q: `SELECT e.*, fi.ev_score, fi.ev_reasoning, fi.summary_subject, fi.summary_body, fi.target_handle
+        FROM examples e
+        LEFT JOIN feed_items fi ON e.source_feed_item_id = fi.id
+        ${where}
+        ORDER BY e.sent_at DESC
+        LIMIT ?`,
+    v: [...vals, limit],
+  }).run()) || []
+  // Hydrate JSON columns once for both formats.
+  const hydrated = rows.map((r: any) => ({
+    ...r,
+    edit_chain: parseJson(r.edit_chain) || [],
+    parent_context: parseJson(r.parent_context) || {},
+  }))
+  if (qp('format') === 'md') {
+    return c.text(formatExamplesMarkdown(hydrated), 200, { 'content-type': 'text/markdown; charset=utf-8' })
+  }
+  return c.json({ count: hydrated.length, examples: hydrated })
+})
+
+// Word-level diff rendered in git's --word-diff=plain style: [-removed-]{+added+}
+// inline. Uses jsdiff's diffWords, which is the JS port of Myers — same family
+// as git's algorithm. Output goes inside a plain ``` fence (not ```diff) because
+// the inline markers aren't standard unified-diff syntax that GitHub colors.
+function wordDiff(a: string, b: string): string {
+  const parts = diffWords(a || '', b || '')
+  return parts.map((p: any) => {
+    if (p.added)   return '{+' + p.value + '+}'
+    if (p.removed) return '[-' + p.value + '-]'
+    return p.value
+  }).join('')
+}
+
+function formatExamplesMarkdown(rows: any[]): string {
+  if (!rows.length) return '_(no examples)_\n'
+  const out: string[] = []
+  rows.forEach((r, idx) => {
+    const ctx = r.parent_context || {}
+    const eng = ctx.engagement || {}
+    const engStr = [
+      eng.likes != null     ? `${eng.likes} likes`     : null,
+      eng.retweets != null  ? `${eng.retweets} RT`     : null,
+      eng.upvotes != null   ? `${eng.upvotes} up`      : null,
+      eng.comments != null  ? `${eng.comments} comments` : null,
+      eng.replies != null   ? `${eng.replies} replies` : null,
+      eng.views != null     ? `${eng.views} views`     : null,
+    ].filter(Boolean).join(', ')
+    const ec = r.edit_chain || []
+    const a = (r.initial_draft || '').trim()
+    const b = (r.final_sent || '').trim()
+    const sameDraft = a === b
+
+    out.push(`### ${idx + 1}. \`${r.source_feed_item_id}\``)
+    out.push('')
+    out.push(`Channel: **${r.channel}** · Type: **${r.message_type}** · Audience: ${r.audience || '—'} · Goal: ${r.goal || '—'} · EV: ${r.ev_score ?? '—'} · Outcome: \`${r.outcome}\` · Iterations: ${r.iteration_count}`)
+    out.push(`Sent: ${r.sent_at} · Source: ${ctx.url || '—'} · Posted: ${ctx.platform_sent_url || '—'}`)
+    out.push('')
+    out.push(`**Parent** (${ctx.author || '—'}${engStr ? ` · ${engStr}` : ''}):`)
+    out.push('> ' + String(ctx.text || '').replace(/\n/g, '\n> '))
+    if (r.summary_body) { out.push(''); out.push(`**Why this was drafted**: ${r.summary_body}`) }
+    out.push('')
+    if (sameDraft) {
+      out.push('**Draft → Sent**: _(sent as drafted, no edits)_')
+      out.push('')
+      out.push('```')
+      out.push(b)
+      out.push('```')
+    } else {
+      out.push('**Draft → Sent** (word-diff, `[-removed-]{+added+}`):')
+      out.push('```')
+      out.push(wordDiff(a, b))
+      out.push('```')
+    }
+    if (ec.length > 1) {
+      out.push('')
+      out.push('**Edit chain**:')
+      ec.forEach((e: any, i: number) => {
+        const role = e.role || '?'
+        const payload = e.draft != null ? `: \`${String(e.draft).slice(0, 200)}${String(e.draft).length > 200 ? '…' : ''}\``
+                       : e.text != null ? `: "${e.text}"`
+                       : ''
+        out.push(`${i + 1}. \`${role}\`${payload}`)
+      })
+    }
+    out.push('')
+    out.push('---')
+    out.push('')
+  })
+  return out.join('\n')
+}
+
+// POST /api/admin/example-patch — patch fields on the examples row tied to a feed_item.
+// Use for backfill (e.g. restore original AI draft into initial_draft when the
+// seed-edit_chain bug overwrote it). Scoped to fields safe to retroactively set.
+app.post('/api/admin/example-patch', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const fid = String(body.feed_item_id || '')
+  if (!fid) return c.json({ error: 'feed_item_id required' }, 400)
+  const sets: string[] = []
+  const vals: any[] = []
+  if (body.initial_draft != null) { sets.push('initial_draft = ?'); vals.push(String(body.initial_draft)) }
+  if (body.edit_chain != null) {
+    const v = typeof body.edit_chain === 'string' ? body.edit_chain : JSON.stringify(body.edit_chain)
+    sets.push('edit_chain = ?'); vals.push(v)
+  }
+  if (!sets.length) return c.json({ error: 'nothing to patch — supply initial_draft and/or edit_chain' }, 400)
+  const db = c.get('$db')
+  await db.rawSQL({
+    q: `UPDATE examples SET ${sets.join(', ')} WHERE source_feed_item_id = ?`,
+    v: [...vals, fid],
+  }).run()
+  return c.json({ ok: true, feed_item_id: fid, set: sets.length })
+})
+
 // POST /api/admin/text-replace — bulk find/replace across draft-shaped text columns.
 // Scope is intentionally narrow: only my own writing (drafts + edit chains + voice doc),
 // never parent_text / parent_context which contain other people's words verbatim.
@@ -908,6 +1060,26 @@ app.post('/api/research', async (c) => {
   }
   const id = String(body.id || 'fi_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12))
   const feedId = String(body.feed_id || 'feed_default')
+  // Seed edit_chain with the AI's v1 draft. Without this, the user's first
+  // manual edit overwrites current_draft and the original AI draft is lost —
+  // every downstream consumer (mark-sent, examples diff, voice review) then
+  // can't tell drafted-from-sent apart. Accept a client-supplied chain only
+  // if it already contains an ai-role entry; otherwise prepend our seed.
+  let seedChain: any[] = []
+  if (body.edit_chain != null) {
+    const supplied = typeof body.edit_chain === 'string' ? (parseJson(body.edit_chain) || []) : body.edit_chain
+    if (Array.isArray(supplied)) seedChain = supplied
+  }
+  const hasAi = seedChain.some((e: any) => e?.role === 'ai' || e?.role === 'cmo')
+  if (!hasAi) {
+    seedChain.unshift({
+      role: 'ai',
+      v: 1,
+      draft: body.current_draft,
+      ts: new Date().toISOString(),
+      skill_snapshot_hash: body.skill_snapshot_hash ?? null,
+    })
+  }
   await db.rawSQL({
     q: `INSERT INTO feed_items (
       id, feed_id, status, channel, audience, message_type, goal,
@@ -923,7 +1095,7 @@ app.post('/api/research', async (c) => {
       body.parent_engagement != null ? (typeof body.parent_engagement === 'string' ? body.parent_engagement : JSON.stringify(body.parent_engagement)) : null,
       body.parent_posted_at ?? null, body.parent_url ?? null,
       body.target_handle ?? null, body.current_draft,
-      body.edit_chain != null ? (typeof body.edit_chain === 'string' ? body.edit_chain : JSON.stringify(body.edit_chain)) : null,
+      JSON.stringify(seedChain),
       body.skill_snapshot_hash ?? null,
       body.related_example_ids != null ? (typeof body.related_example_ids === 'string' ? body.related_example_ids : JSON.stringify(body.related_example_ids)) : null,
     ],
