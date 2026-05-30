@@ -821,10 +821,10 @@ app.post('/research', async (c) => {
 // /api/* — for the autolead skill running in the user's Claude session
 // ──────────────────────────────────────────────────────────────────
 
-// Auth: all /api/* require Authorization: Bearer <AUTOLEAD_API_TOKEN>
+// Auth: all /api/* require Authorization: Bearer <OUTREACH_API_TOKEN>
 async function requireApiToken(c: any, next: any) {
-  const expected = c.env.AUTOLEAD_API_TOKEN
-  if (!expected) return c.json({ error: 'AUTOLEAD_API_TOKEN not configured on the worker' }, 503)
+  const expected = c.env.OUTREACH_API_TOKEN
+  if (!expected) return c.json({ error: 'OUTREACH_API_TOKEN not configured on the worker' }, 503)
   const got = (c.req.header('authorization') || '').replace(/^Bearer\s+/i, '')
   if (got !== expected) return c.json({ error: 'unauthorized' }, 401)
   await next()
