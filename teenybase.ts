@@ -108,6 +108,14 @@ const feed_items = {
 
     tableField('approved_at', 'date', 'timestamp', {}),
     tableField('sent_at', 'date', 'timestamp', {}),
+
+    // Rejection-as-signal: when the user marks a candidate "not a good target",
+    // the reason is stored here and fed into the NEXT research cycle as a
+    // negative-example prior (via GET /api/rejections). This is intentionally
+    // separate from `revision_feedback` which triggers re-drafting; rejections
+    // are terminal and influence research-phase taste, not draft revision.
+    tableField('rejection_reason', 'text', 'text', {}),
+    tableField('rejected_at', 'date', 'timestamp', {}),
   ],
   indexes: [
     { fields: ['feed_id', 'status'] },

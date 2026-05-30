@@ -603,8 +603,8 @@ function renderReplyCard(item: any): any {
               <span class="text-[10px] ml-0.5">▾</span>
             </span>
             <div class="flex flex-col">
-              <span class="text-gray-800 font-medium">Revise this draft</span>
-              <span class="text-[11px] text-gray-500">your note will rewrite the email above</span>
+              <span class="text-gray-800 font-medium">Revise or reject this draft</span>
+              <span class="text-[11px] text-gray-500">revise → rewrites the draft. reject → marks the candidate bad and feeds the reason into the next research cycle.</span>
             </div>
           </div>
           <div class="flex items-center gap-3 text-gray-400 flex-shrink-0">
@@ -613,14 +613,20 @@ function renderReplyCard(item: any): any {
         </div>
         <div class="px-6 py-5">
           <textarea name="text" rows="4" data-min-h="100" data-autofocus required
-                    placeholder="e.g. make it shorter, drop the second sentence, more skeptical"
+                    placeholder="revise: e.g. make it shorter, drop the second sentence, more skeptical&#10;reject: e.g. wrong audience, OP's parent was about Y not X, off-topic for this sub"
                     class="w-full text-[14px] text-gray-900 leading-relaxed compose focus:outline-none border-0 placeholder:text-gray-400"></textarea>
         </div>
         <div class="px-5 py-3 border-t border-gray-100 flex items-center justify-between">
           <div class="flex items-center gap-2">
-            <button type="submit" class="inline-flex items-center gap-1.5 px-5 py-1.5 text-[13px] bg-blue-600 hover:bg-blue-700 text-white rounded-full font-medium shadow-sm">
-              Send
+            <button type="submit"
+                    class="inline-flex items-center gap-1.5 px-5 py-1.5 text-[13px] bg-blue-600 hover:bg-blue-700 text-white rounded-full font-medium shadow-sm">
+              Revise
               <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg>
+            </button>
+            <button type="submit" formaction="/items/${esc(item.id)}/reject"
+                    class="inline-flex items-center gap-1.5 px-4 py-1.5 text-[13px] border border-gray-300 text-gray-700 rounded-full hover:bg-red-50 hover:border-red-300 hover:text-red-700 font-medium"
+                    title="Reject as bad target. Reason feeds the next research cycle.">
+              Reject with reason
             </button>
             <a href="/items/${esc(item.id)}" class="px-3 py-1.5 text-[13px] text-gray-600 hover:text-gray-900">Cancel</a>
           </div>
@@ -776,15 +782,20 @@ app.post('/items/:id/unqueue', async (c) => {
   return c.redirect(`/items/${id}`, 303)
 })
 
-// POST /items/:id/reject
+// POST /items/:id/reject — optional `text` (or `reason`) form field becomes the
+// rejection_reason and is exposed via GET /api/rejections for the next research
+// cycle to learn from. Empty body = quick discard (trash icon), no reason stored.
 app.post('/items/:id/reject', async (c) => {
   const db = c.get('$db')
   const id = c.req.param('id')
+  const form = await c.req.formData()
+  const reason = String(form.get('text') || form.get('reason') || '').trim() || null
   await db.rawSQL({
-    q: 'UPDATE feed_items SET status = ? WHERE id = ?',
-    v: ['rejected', id],
+    q: 'UPDATE feed_items SET status = ?, rejection_reason = ?, rejected_at = ?, revision_pending = 0, send_pending = 0 WHERE id = ?',
+    v: ['rejected', reason, new Date().toISOString(), id],
   }).run()
-  return c.redirect('/?flash=Discarded', 303)
+  const flash = reason ? 'Rejected with reason (will inform next research cycle)' : 'Discarded'
+  return c.redirect(`/?flash=${encodeURIComponent(flash)}`, 303)
 })
 
 // POST /items/:id/reply — UI form: flip revision_pending=1, store feedback text + user_feedback chain entry
@@ -872,6 +883,33 @@ app.post('/api/skill', async (c) => {
     v: [hash, skillName, content, notes, new Date().toISOString()],
   }).run()
   return c.json({ ok: true, hash })
+})
+
+// GET /api/rejections — fetch user-rejected candidates with reasons, for the next
+// research cycle to use as negative-example priors. Filters: since (ISO, on
+// rejected_at), channel, audience, limit (default 50, max 200). Only returns
+// items where rejection_reason IS NOT NULL — bare trash-icon discards (no
+// reason recorded) don't carry signal so they're excluded.
+app.get('/api/rejections', async (c) => {
+  const db = c.get('$db')
+  const qp = (k: string) => c.req.query(k)
+  const wheres: string[] = ["status = 'rejected'", "rejection_reason IS NOT NULL"]
+  const vals: any[] = []
+  if (qp('since'))    { wheres.push('rejected_at >= ?'); vals.push(qp('since')) }
+  if (qp('channel'))  { wheres.push('channel = ?');      vals.push(qp('channel')) }
+  if (qp('audience')) { wheres.push('audience = ?');     vals.push(qp('audience')) }
+  const limit = Math.min(Math.max(Number(qp('limit') || 50), 1), 200)
+  const rows: any[] = (await db.rawSQL({
+    q: `SELECT id, channel, message_type, audience, goal, ev_score, ev_reasoning,
+              summary_subject, summary_body, parent_text, parent_author_handle,
+              parent_url, current_draft, rejection_reason, rejected_at, created
+        FROM feed_items
+        WHERE ${wheres.join(' AND ')}
+        ORDER BY rejected_at DESC
+        LIMIT ?`,
+    v: [...vals, limit],
+  }).run()) || []
+  return c.json({ count: rows.length, rejections: rows })
 })
 
 // GET /api/examples — fetch sent examples for review or for runtime ambiguity lookups.
