@@ -1,0 +1,5 @@
+{
+  "name": "outreach-workflow",
+  "main": "worker.ts",
+  "type": "module"
+}
