@@ -203,6 +203,7 @@ function renderListRow(item: any, activeId: string | null): any {
   const isSent = item.status === 'sent'
   const isRejected = item.status === 'rejected'
   const isQueued = !!item.send_pending && !isSent && !isRejected
+  const isRevising = !!item.revision_pending && !isSent && !isRejected && !isQueued
   const recipient = item.target_handle || '—'
   const channelSuffix = (item.message_type || '').toLowerCase() === 'dm' ? ' · DM' : ''
 
@@ -212,13 +213,15 @@ function renderListRow(item: any, activeId: string | null): any {
     rightLabel = html`<span class="text-[11px] text-emerald-700 font-semibold">Sent</span>`
   } else if (isQueued) {
     rightLabel = html`<span class="text-[11px] text-amber-700 font-semibold">Sending…</span>`
+  } else if (isRevising) {
+    rightLabel = html`<span class="text-[11px] text-violet-700 font-semibold">Revising…</span>`
   } else if (isRejected) {
     rightLabel = html`<span class="text-[11px] text-gray-400 font-medium">Discarded</span>`
   } else {
     rightLabel = html`<span class="text-[12px] tabular-nums text-gray-600 font-medium">${esc(evPct)}</span>`
   }
 
-  // Leading icon: ✓ sent, ⏳ queued, ✕ rejected, ☆ draft
+  // Leading icon
   let leadingIcon: any
   if (isSent) {
     leadingIcon = html`<span class="w-4 flex-shrink-0 text-emerald-500 leading-none" title="Sent">
@@ -226,6 +229,10 @@ function renderListRow(item: any, activeId: string | null): any {
     </span>`
   } else if (isQueued) {
     leadingIcon = html`<span class="w-4 flex-shrink-0 text-amber-500 leading-none" title="Sending">
+      <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+    </span>`
+  } else if (isRevising) {
+    leadingIcon = html`<span class="w-4 flex-shrink-0 text-violet-500 leading-none" title="Awaiting redraft">
       <svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
     </span>`
   } else if (isRejected) {
@@ -242,6 +249,8 @@ function renderListRow(item: any, activeId: string | null): any {
     edgeStripe = html`<span class="absolute left-0 top-0 bottom-0 w-[3px] bg-emerald-400"></span>`
   } else if (isQueued) {
     edgeStripe = html`<span class="absolute left-0 top-0 bottom-0 w-[3px] bg-amber-400"></span>`
+  } else if (isRevising) {
+    edgeStripe = html`<span class="absolute left-0 top-0 bottom-0 w-[3px] bg-violet-400"></span>`
   } else if (isRejected) {
     edgeStripe = html`<span class="absolute left-0 top-0 bottom-0 w-[3px] bg-gray-300"></span>`
   } else if (isHigh) {
@@ -251,12 +260,15 @@ function renderListRow(item: any, activeId: string | null): any {
   // Text muting for done states
   const muted = isSent || isRejected
   const recipientClass = isQueued ? 'font-medium text-amber-900'
+                       : isRevising ? 'font-medium text-violet-900'
                        : muted ? 'text-gray-500'
                        : (isActive ? 'font-semibold text-gray-900' : 'font-medium text-gray-800')
   const subjectClass = isQueued ? 'font-medium text-amber-900'
+                     : isRevising ? 'font-medium text-violet-900'
                      : muted ? 'text-gray-500'
                      : (isActive ? 'font-semibold text-gray-900' : 'font-medium text-gray-800')
   const previewClass = isQueued ? 'text-amber-800'
+                     : isRevising ? 'text-violet-800'
                      : muted ? 'text-gray-400'
                      : 'text-gray-500'
 
@@ -264,6 +276,7 @@ function renderListRow(item: any, activeId: string | null): any {
   const bgClass = isActive ? 'bg-blue-50/60'
                 : isSent ? 'bg-emerald-50/40 hover:bg-emerald-50/70'
                 : isQueued ? 'bg-amber-50/50 hover:bg-amber-50/80'
+                : isRevising ? 'bg-violet-50/50 hover:bg-violet-50/80'
                 : isRejected ? 'bg-gray-50/60 hover:bg-gray-50'
                 : 'hover:bg-gray-50'
 
@@ -667,25 +680,36 @@ async function loadItems(db: any) {
   return rows
 }
 
-// Gmail-style buckets. Each item falls into exactly one tab. Order matters
-// because send_pending and revision_pending can both be 1 in edge cases (race
-// between user clicks) — terminal states win, then pending flags, then draft.
-type Buckets = { drafts: any[]; revising: any[]; outgoing: any[]; sent: any[]; rejected: any[] }
+// Gmail-style 3-tab split. Drafts holds both fresh drafts and items the user
+// asked to revise (revising items are appended at the BOTTOM of the tab, with
+// distinct purple styling — see renderListRow). Sent holds both sent items and
+// items queued to send (queued items go at the TOP with the amber spinner,
+// since they're the most current things happening). Rejected = terminal
+// negative with a stated reason; silent trash-icon discards are hidden from
+// every tab.
+type Buckets = { drafts: any[]; sent: any[]; rejected: any[] }
 function bucketItems(items: any[]): Buckets {
-  const b: Buckets = { drafts: [], revising: [], outgoing: [], sent: [], rejected: [] }
+  const draftsBase: any[] = []
+  const draftsRevising: any[] = []
+  const sentBase: any[] = []
+  const sentOutgoing: any[] = []
+  const rejected: any[] = []
   for (const it of items) {
-    if (it.status === 'sent') b.sent.push(it)
+    if (it.status === 'sent') sentBase.push(it)
     else if (it.status === 'rejected') {
-      if (it.rejection_reason) b.rejected.push(it)
-      // silent discards (no reason) are hidden from every tab
-    } else if (it.revision_pending) b.revising.push(it)
-    else if (it.send_pending) b.outgoing.push(it)
-    else b.drafts.push(it)
+      if (it.rejection_reason) rejected.push(it)
+    } else if (it.send_pending) sentOutgoing.push(it)
+    else if (it.revision_pending) draftsRevising.push(it)
+    else draftsBase.push(it)
   }
-  return b
+  return {
+    drafts: [...draftsBase, ...draftsRevising],
+    sent: [...sentOutgoing, ...sentBase],
+    rejected,
+  }
 }
 
-const TAB_IDS = ['drafts', 'revising', 'outgoing', 'sent', 'rejected'] as const
+const TAB_IDS = ['drafts', 'sent', 'rejected'] as const
 type TabId = typeof TAB_IDS[number]
 function normalizeTab(raw: string | undefined): TabId {
   const t = (raw || 'drafts') as TabId
@@ -703,8 +727,6 @@ async function loadItem(db: any, id: string) {
 function renderTabsStrip(activeTab: TabId, buckets: Buckets): any {
   const tabs: Array<{ id: TabId; label: string; count: number }> = [
     { id: 'drafts',   label: 'Drafts',   count: buckets.drafts.length },
-    { id: 'revising', label: 'Revising', count: buckets.revising.length },
-    { id: 'outgoing', label: 'Outgoing', count: buckets.outgoing.length },
     { id: 'sent',     label: 'Sent',     count: buckets.sent.length },
     { id: 'rejected', label: 'Rejected', count: buckets.rejected.length },
   ]
